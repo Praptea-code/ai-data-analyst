@@ -7,6 +7,7 @@ from typing import TypedDict
 import pandas as pd
 from dotenv import load_dotenv
 from langchain_groq import ChatGroq
+from langchain_openai import ChatOpenAI
 from langgraph.graph import END, StateGraph
 
 from tools import get_database_schema
@@ -15,6 +16,13 @@ sys.stdout.reconfigure(encoding="utf-8")
 
 DB_PATH = "data/sales.db"
 MAX_STEPS = 8
+
+GROQ_MODEL = "openai/gpt-oss-20b"
+# OpenRouter fallback: a current :free general-purpose instruct model.
+# meta-llama/llama-3.3-70b-instruct:free is no longer listed on OpenRouter, so we
+# use Google's Gemma 4 31B Instruct (free) as an equivalent general-purpose model.
+OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+OPENROUTER_MODEL = "google/gemma-4-31b-it:free"
 
 
 class InvestigationState(TypedDict, total=False):
@@ -35,15 +43,51 @@ class InvestigationState(TypedDict, total=False):
 def get_llm():
     load_dotenv()
     return ChatGroq(
-        model="openai/gpt-oss-20b",
+        model=GROQ_MODEL,
         api_key=os.getenv("GROQ_API_KEY"),
         temperature=0,
     )
 
 
-def llm_invoke(prompt: str, max_retries: int = 5) -> str:
-    """Invoke the LLM with retry/backoff for Groq free-tier rate limits (429) and empty responses."""
-    llm = get_llm()
+def get_fallback_llm():
+    """Build an OpenRouter chat client (OpenAI-compatible) if a key is present."""
+    load_dotenv()
+    api_key = os.getenv("OPENROUTER_API_KEY")
+    if not api_key:
+        return None
+    return ChatOpenAI(
+        model=OPENROUTER_MODEL,
+        api_key=api_key,
+        base_url=OPENROUTER_BASE_URL,
+        temperature=0,
+    )
+
+
+def is_rate_limit_error(err) -> bool:
+    """True if an exception is a provider rate-limit/quota error.
+
+    OpenRouter can also surface these as 429 (insufficient_quota) or 413; Groq
+    uses "tokens per minute" / "tokens per day".
+    """
+    text = str(err).lower()
+    markers = (
+        "429",
+        "413",
+        "rate limit",
+        "rate_limit",
+        "tokens per minute",
+        "tokens per day",
+        "insufficient_quota",
+        "quota",
+    )
+    return any(m in text for m in markers)
+
+
+def _invoke_llm(llm, prompt: str, max_retries: int = 3) -> str:
+    """Call a single client with retry/backoff, returning trimmed text.
+
+    Raises the underlying error if retries are exhausted.
+    """
     last_err = None
     for attempt in range(max_retries):
         try:
@@ -51,16 +95,49 @@ def llm_invoke(prompt: str, max_retries: int = 5) -> str:
             if content and content.strip():
                 return content.strip()
             last_err = RuntimeError("Empty LLM response")
-        except Exception as e:  # noqa: BLE001 - retry any transient API error
+        except Exception as e:  # noqa: BLE001 - retry transient API errors
             last_err = e
-            err_text = str(e)
-            wait = 2 ** attempt  # 1s, 2s, 4s, 8s, 16s
-            if "429" in err_text or "RateLimit" in err_text or "timed out" in err_text.lower():
-                time.sleep(wait)
+            if is_rate_limit_error(e):
+                time.sleep(2 ** attempt)  # 1s, 2s, 4s
                 continue
             raise
         time.sleep(2 ** attempt)
     raise RuntimeError(f"LLM call failed after retries: {last_err}")
+
+
+def invoke_with_fallback(prompt: str) -> str:
+    """Run an LLM call, preferring Groq and falling back to OpenRouter.
+
+    Tries Groq a few times; if the call keeps hitting a rate-limit/quota error,
+    the same prompt is retried via OpenRouter. Real (non-rate-limit) failures and
+    OpenRouter failures are propagated normally.
+
+    The provider that served the call is printed so it is visible per step.
+    """
+    groq_errs = []
+    for attempt in range(3):  # three total Groq attempts before falling back
+        try:
+            result = _invoke_llm(get_llm(), prompt)
+            print(f"[llm:groq] step served by Groq ({GROQ_MODEL}).", flush=True)
+            return result
+        except Exception as e:  # noqa: BLE001
+            if is_rate_limit_error(e):
+                groq_errs.append(str(e))
+                time.sleep(2 ** attempt)
+                continue
+            raise
+
+    fallback = get_fallback_llm()
+    if fallback is None:
+        raise RuntimeError(
+            "Rate limited on Groq and no OPENROUTER_API_KEY set to fall back to. "
+            f"Last Groq error: {groq_errs[-1] if groq_errs else 'unknown'}"
+        )
+
+    print(f"[llm:openrouter] Groq rate-limited; falling back to {OPENROUTER_MODEL}.", flush=True)
+    result = _invoke_llm(fallback, prompt)
+    print(f"[llm:openrouter] step served by OpenRouter ({OPENROUTER_MODEL}).", flush=True)
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -88,7 +165,7 @@ Return ONLY a JSON array of strings, each string a short description of one SQL 
 Example: ["total revenue by month for July and August 2026", "revenue by region for July and August 2026", "revenue by product in the worst region for July and August 2026"]
 Do not include any text outside the JSON array."""
 
-    resp = llm_invoke(prompt)
+    resp = invoke_with_fallback(prompt)
     content = resp.strip()
     # Defensive: extract first [...] block
     start = content.find("[")
@@ -144,7 +221,7 @@ Revenue per row = quantity * unit_price * (1 - discount).
 
 Return ONLY the SQL statement. No markdown, no explanation."""
 
-    resp = llm_invoke(prompt)
+    resp = invoke_with_fallback(prompt)
     sql = resp.strip()
     if sql.startswith("```"):
         sql = sql.strip("`")
@@ -229,7 +306,7 @@ If the step errors, note the error and what a reasonable next step is.
 
 Return ONLY the observation text."""
 
-    resp = llm_invoke(prompt)
+    resp = invoke_with_fallback(prompt)
     observation = resp.strip()
 
     observations = list(state.get("observations", []))
@@ -352,7 +429,7 @@ Write a structured final answer as a JSON object with these exact keys:
 Use ONLY numbers that appear in the findings. Never invent data.
 Return ONLY the JSON object, no markdown."""
 
-    resp = llm_invoke(prompt)
+    resp = invoke_with_fallback(prompt)
     content = resp.strip()
     start = content.find("{")
     end = content.rfind("}")

@@ -41,11 +41,25 @@ pip install -r requirements.txt
 # 4. Configure secrets
 cp .env.example .env
 # Edit .env and set GROQ_API_KEY=...  (https://console.groq.com)
+# Optionally set OPENROUTER_API_KEY=...  (https://openrouter.ai/keys)
 
 # 5. Build the example database (seeded with a deliberate August 2026 anomaly
 #    in West-region Product A sales)
 python database.py
 ```
+
+## LLM providers: Groq with OpenRouter fallback
+
+The investigation loop uses **Groq** (`openai/gpt-oss-20b`) as the primary provider and
+automatically falls back to **OpenRouter** when Groq's free-tier limits are hit (rate
+limit / tokens per minute / tokens per day / quota errors).
+
+- Add `OPENROUTER_API_KEY` to `.env` to enable the fallback (optional but recommended).
+- OpenRouter's free, no-cost `:free` models are used. The default fallback model is
+  currently `google/gemma-4-31b-it:free` (the previous `meta-llama/llama-3.3-70b-instruct:free`
+  is no longer listed on OpenRouter); it is configurable via `OPENROUTER_MODEL` in `graph.py`.
+- Each LLM step logs which provider served it (e.g. `[llm:groq]` or `[llm:openrouter]`).
+- All model calls still go through the same read-only SQL pipeline; only the LLM provider differs.
 
 ## Usage
 
