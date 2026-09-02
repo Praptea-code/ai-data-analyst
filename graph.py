@@ -24,6 +24,11 @@ GROQ_MODEL = "openai/gpt-oss-20b"
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 OPENROUTER_MODEL = "google/gemma-4-31b-it:free"
 
+# Which provider to try first. Accepted values: "groq" or "openrouter".
+# Defaults to OpenRouter while Groq's free tier is under heavy testing load;
+# flip back to "groq" (faster) anytime by setting LLM_PRIMARY_PROVIDER=groq.
+LLM_PRIMARY_PROVIDER_DEFAULT = "openrouter"
+
 
 class InvestigationState(TypedDict, total=False):
     question: str
@@ -40,7 +45,7 @@ class InvestigationState(TypedDict, total=False):
     final_answer: dict
 
 
-def get_llm():
+def get_groq_llm():
     load_dotenv()
     return ChatGroq(
         model=GROQ_MODEL,
@@ -49,8 +54,8 @@ def get_llm():
     )
 
 
-def get_fallback_llm():
-    """Build an OpenRouter chat client (OpenAI-compatible) if a key is present."""
+def get_openrouter_llm():
+    """Build an OpenRouter chat client (OpenAI-compatible), or None if no key."""
     load_dotenv()
     api_key = os.getenv("OPENROUTER_API_KEY")
     if not api_key:
@@ -61,6 +66,31 @@ def get_fallback_llm():
         base_url=OPENROUTER_BASE_URL,
         temperature=0,
     )
+
+
+def get_provider_llm(name: str):
+    """Return the chat client for a provider name ("groq" | "openrouter")."""
+    if name == "groq":
+        return get_groq_llm()
+    if name == "openrouter":
+        return get_openrouter_llm()
+    raise ValueError(f"Unknown LLM provider: {name!r}. Expected 'groq' or 'openrouter'.")
+
+
+def get_provider_order() -> list[str]:
+    """Provider names in the order they should be tried.
+
+    Reads LLM_PRIMARY_PROVIDER (default "openrouter") and returns the ordered
+    list, primary first.
+    """
+    primary = os.getenv("LLM_PRIMARY_PROVIDER", LLM_PRIMARY_PROVIDER_DEFAULT).strip().lower()
+    if primary not in ("groq", "openrouter"):
+        raise ValueError(
+            f"Invalid LLM_PRIMARY_PROVIDER: {primary!r}. Accepted values: 'groq' or 'openrouter'."
+        )
+    if primary == "groq":
+        return ["groq", "openrouter"]
+    return ["openrouter", "groq"]
 
 
 def is_rate_limit_error(err) -> bool:
@@ -106,38 +136,47 @@ def _invoke_llm(llm, prompt: str, max_retries: int = 3) -> str:
 
 
 def invoke_with_fallback(prompt: str) -> str:
-    """Run an LLM call, preferring Groq and falling back to OpenRouter.
+    """Run an LLM call trying providers in configurable order.
 
-    Tries Groq a few times; if the call keeps hitting a rate-limit/quota error,
-    the same prompt is retried via OpenRouter. Real (non-rate-limit) failures and
-    OpenRouter failures are propagated normally.
+    Order is controlled by LLM_PRIMARY_PROVIDER (default "openrouter"). On a
+    rate-limit/quota error the call moves to the other provider. Real
+    (non-rate-limit) failures are propagated normally.
 
-    The provider that served the call is printed so it is visible per step.
+    The provider that served each call is printed so it is visible per step.
     """
-    groq_errs = []
-    for attempt in range(3):  # three total Groq attempts before falling back
+    order = get_provider_order()
+
+    # If the primary provider is openrouter but no key is configured, fail fast
+    # with a clear message instead of silently using Groq.
+    if order[0] == "openrouter" and get_openrouter_llm() is None:
+        raise RuntimeError(
+            "LLM_PRIMARY_PROVIDER is 'openrouter' but OPENROUTER_API_KEY is not set. "
+            "Set OPENROUTER_API_KEY in .env or set LLM_PRIMARY_PROVIDER=groq."
+        )
+
+    errors = []
+    for name in order:
+        llm = get_provider_llm(name)
+        if llm is None:
+            # Fallback provider unavailable (e.g. openrouter with no key, when groq is primary).
+            errors.append(f"{name}: no API key configured")
+            continue
+
         try:
-            result = _invoke_llm(get_llm(), prompt)
-            print(f"[llm:groq] step served by Groq ({GROQ_MODEL}).", flush=True)
+            result = _invoke_llm(llm, prompt)
+            print(f"[llm:{name}] step served by {name} "
+                  f"({GROQ_MODEL if name == 'groq' else OPENROUTER_MODEL}).", flush=True)
             return result
         except Exception as e:  # noqa: BLE001
             if is_rate_limit_error(e):
-                groq_errs.append(str(e))
-                time.sleep(2 ** attempt)
+                errors.append(f"{name}: {e}")
                 continue
             raise
 
-    fallback = get_fallback_llm()
-    if fallback is None:
-        raise RuntimeError(
-            "Rate limited on Groq and no OPENROUTER_API_KEY set to fall back to. "
-            f"Last Groq error: {groq_errs[-1] if groq_errs else 'unknown'}"
-        )
-
-    print(f"[llm:openrouter] Groq rate-limited; falling back to {OPENROUTER_MODEL}.", flush=True)
-    result = _invoke_llm(fallback, prompt)
-    print(f"[llm:openrouter] step served by OpenRouter ({OPENROUTER_MODEL}).", flush=True)
-    return result
+    raise RuntimeError(
+        "All LLM providers were unavailable or rate-limited: "
+        + ("; ".join(errors) if errors else "no providers attempted")
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -48,16 +48,25 @@ cp .env.example .env
 python database.py
 ```
 
-## LLM providers: Groq with OpenRouter fallback
+## LLM providers: configurable order, OpenRouter-first by default
 
-The investigation loop uses **Groq** (`openai/gpt-oss-20b`) as the primary provider and
-automatically falls back to **OpenRouter** when Groq's free-tier limits are hit (rate
-limit / tokens per minute / tokens per day / quota errors).
+The investigation loop uses two LLM providers — **Groq** (`openai/gpt-oss-20b`) and
+**OpenRouter** (free `:free` models) — and can switch between them on rate-limit /
+tokens-per-minute / tokens-per-day / quota errors.
 
-- Add `OPENROUTER_API_KEY` to `.env` to enable the fallback (optional but recommended).
-- OpenRouter's free, no-cost `:free` models are used. The default fallback model is
-  currently `google/gemma-4-31b-it:free` (the previous `meta-llama/llama-3.3-70b-instruct:free`
-  is no longer listed on OpenRouter); it is configurable via `OPENROUTER_MODEL` in `graph.py`.
+The provider order is controlled by `LLM_PRIMARY_PROVIDER` in `.env`:
+
+- `LLM_PRIMARY_PROVIDER=openrouter` (default) — tries OpenRouter first, falls back to Groq.
+- `LLM_PRIMARY_PROVIDER=groq` — the faster option; tries Groq first, falls back to OpenRouter.
+
+It is currently recommended to leave it as `openrouter` while Groq's free tier is under
+heavy testing load, but it can be flipped back to `groq` anytime without code changes.
+
+- Add `OPENROUTER_API_KEY` to `.env` to enable OpenRouter (required when it is the primary
+  provider; optional but recommended otherwise).
+- OpenRouter's free, no-cost `:free` models are used. The default model is
+  `google/gemma-4-31b-it:free` (the previous `meta-llama/llama-3.3-70b-instruct:free` is no
+  longer listed on OpenRouter); it is configurable via `OPENROUTER_MODEL` in `graph.py`.
 - Each LLM step logs which provider served it (e.g. `[llm:groq]` or `[llm:openrouter]`).
 - All model calls still go through the same read-only SQL pipeline; only the LLM provider differs.
 
