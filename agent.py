@@ -1,70 +1,69 @@
-import os
+import argparse
+import json
 import sys
+
+from graph import run_investigation
 
 sys.stdout.reconfigure(encoding="utf-8")
 
-from dotenv import load_dotenv
-from langchain_groq import ChatGroq
-from langchain.agents import create_agent
-from langchain.agents.middleware import AgentMiddleware
-from langchain_core.messages import HumanMessage, SystemMessage, trim_messages
-from tools import get_database_schema, execute_sql
+
+def pretty_answer(answer: dict) -> str:
+    lines = []
+    lines.append("EXECUTIVE SUMMARY")
+    lines.append("  " + (answer.get("executive_summary") or ""))
+    lines.append("")
+    lines.append("MAIN CAUSE")
+    lines.append("  " + (answer.get("main_cause") or ""))
+    lines.append("")
+    lines.append("KEY DRIVERS")
+    for d in answer.get("key_drivers") or []:
+        lines.append("  - " + d)
+    lines.append("")
+    lines.append("EVIDENCE")
+    for e in answer.get("evidence") or []:
+        lines.append("  - " + e)
+    lines.append("")
+    lines.append("RECOMMENDED INVESTIGATION")
+    for r in answer.get("recommended_investigation") or []:
+        lines.append("  - " + r)
+    if answer.get("chart_captions"):
+        lines.append("")
+        lines.append("CHARTS")
+        for cap in answer.get("chart_captions") or []:
+            lines.append("  - " + cap)
+    return "\n".join(lines)
 
 
-class TrimHistory(AgentMiddleware):
-    """Trim the conversation to a token budget before each model call.
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Run the LangGraph sales-analyst investigation.")
+    parser.add_argument("question", nargs="?", default="Why did revenue fall in August 2026?")
+    parser.add_argument("--json", action="store_true", help="Output raw JSON state instead of a formatted answer.")
+    args = parser.parse_args()
 
-    The free Groq tier caps tokens-per-minute quite low, and every tool round
-    resends the whole history, so we keep only the most recent messages to stay
-    under the limit.
-    """
+    state = run_investigation(args.question)
 
-    def before_model(self, state, runtime):
-        messages = state["messages"]
-        if len(messages) <= 2:
-            return None
-        trimmed = trim_messages(
-            messages,
-            max_tokens=6000,
-            token_counter="approximate",
-            strategy="last",
-            include_system=True,
-            start_on=HumanMessage,
-        )
-        return {"messages": trimmed}
+    if args.json:
+        print(json.dumps(state, indent=2, default=str))
+        return
 
-load_dotenv()
-
-llm = ChatGroq(
-    model="openai/gpt-oss-20b",
-    api_key=os.getenv("GROQ_API_KEY"),
-    temperature=0,
-)
-
-SYSTEM_PROMPT = """You are a careful data analyst assistant with access to a sales database.
-
-You have two tools:
-- get_database_schema: use this first to understand what tables and columns exist.
-- execute_sql: use this to run READ-ONLY SQL queries (SELECT/WITH only) against the database.
-
-Always check the schema before writing SQL if you haven't already seen it.
-Answer the user's question clearly using the actual data returned by execute_sql.
-Never make up numbers — only use what the tool returns.
-"""
-
-agent = create_agent(
-    model=llm,
-    tools=[get_database_schema, execute_sql],
-    system_prompt=SYSTEM_PROMPT,
-    middleware=[TrimHistory()],
-)
+    print("QUESTION:", args.question)
+    print()
+    print("INVESTIGATION PLAN")
+    for i, step in enumerate(state.get("plan", []), 1):
+        print(f"  {i}. {step}")
+    print()
+    print("QUERIES EXECUTED")
+    for q in state.get("queries", []):
+        print("  -", q.replace("\n", " "))
+    print()
+    print("OBSERVATIONS")
+    for obs in state.get("observations", []):
+        print("  " + obs.replace("\n", "\n  "))
+        print("  ---")
+    print()
+    print("FINAL ANSWER")
+    print(pretty_answer(state.get("final_answer", {})))
 
 
 if __name__ == "__main__":
-    question = "What was the total revenue in July 2026?"
-    result = agent.invoke({"messages": [{"role": "user", "content": question}]})
-
-    # Print the final answer
-    final_message = result["messages"][-1]
-    print("\nFINAL ANSWER:\n")
-    print(final_message.content)
+    main()
