@@ -2,13 +2,12 @@ import json
 import os
 import sys
 import time
-from typing import Annotated, TypedDict
+from typing import TypedDict
 
 import pandas as pd
 from dotenv import load_dotenv
 from langchain_groq import ChatGroq
-from langgraph.graph import END, START, StateGraph
-from langgraph.graph.message import add_messages
+from langgraph.graph import END, StateGraph
 
 from tools import get_database_schema
 
@@ -28,7 +27,6 @@ class InvestigationState(TypedDict, total=False):
     findings: list[dict]
     observations: list[str]
     charts: list[dict]
-    messages: Annotated[list, add_messages]
     current_query: str
     current_result: str
     final_answer: dict
@@ -422,23 +420,3 @@ def run_investigation(question: str) -> InvestigationState:
         config={"recursion_limit": 40},
     )
     return result
-
-
-if __name__ == "__main__":
-    import pprint
-
-    q = "Why did revenue fall in August 2026?"
-    state = run_investigation(q)
-    print("=== PLAN ===")
-    pprint.pprint(state.get("plan"))
-    print("\n=== QUERIES ===")
-    for qq in state.get("queries", []):
-        print("-", qq)
-    print("\n=== OBSERVATIONS ===")
-    for o in state.get("observations", []):
-        print(o)
-        print("---")
-    print("\n=== CHARTS ===")
-    pprint.pprint(state.get("charts"))
-    print("\n=== FINAL ANSWER ===")
-    pprint.pprint(state.get("final_answer"))
