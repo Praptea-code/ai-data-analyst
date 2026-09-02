@@ -6,7 +6,32 @@ sys.stdout.reconfigure(encoding="utf-8")
 from dotenv import load_dotenv
 from langchain_groq import ChatGroq
 from langchain.agents import create_agent
+from langchain.agents.middleware import AgentMiddleware
+from langchain_core.messages import HumanMessage, SystemMessage, trim_messages
 from tools import get_database_schema, execute_sql
+
+
+class TrimHistory(AgentMiddleware):
+    """Trim the conversation to a token budget before each model call.
+
+    The free Groq tier caps tokens-per-minute quite low, and every tool round
+    resends the whole history, so we keep only the most recent messages to stay
+    under the limit.
+    """
+
+    def before_model(self, state, runtime):
+        messages = state["messages"]
+        if len(messages) <= 2:
+            return None
+        trimmed = trim_messages(
+            messages,
+            max_tokens=6000,
+            token_counter="approximate",
+            strategy="last",
+            include_system=True,
+            start_on=HumanMessage,
+        )
+        return {"messages": trimmed}
 
 load_dotenv()
 
@@ -31,6 +56,7 @@ agent = create_agent(
     model=llm,
     tools=[get_database_schema, execute_sql],
     system_prompt=SYSTEM_PROMPT,
+    middleware=[TrimHistory()],
 )
 
 
