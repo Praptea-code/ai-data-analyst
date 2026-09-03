@@ -1,3 +1,4 @@
+import re
 import sqlite3
 import pandas as pd
 from langchain_core.tools import tool
@@ -37,7 +38,8 @@ def execute_sql(query: str) -> str:
     if not (lowered.startswith("select") or lowered.startswith("with")):
         return "Error: Only SELECT or WITH statements are allowed."
 
-    if any(word in lowered for word in forbidden):
+    pattern = r'\b(' + '|'.join(forbidden) + r')\b'
+    if re.search(pattern, lowered):
         return "Error: Query contains a forbidden keyword. Only read-only SELECT queries are allowed."
 
     try:
