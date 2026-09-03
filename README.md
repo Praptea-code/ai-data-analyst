@@ -48,26 +48,39 @@ cp .env.example .env
 python database.py
 ```
 
-## LLM providers: configurable order, OpenRouter-first by default
+## LLM providers: 3-tier fallback chain (Cerebras -> Groq -> OpenRouter)
 
-The investigation loop uses two LLM providers — **Groq** (`openai/gpt-oss-20b`) and
-**OpenRouter** (free `:free` models) — and can switch between them on rate-limit /
-tokens-per-minute / tokens-per-day / quota errors.
+The investigation loop uses three LLM providers — **Cerebras** (`llama-3.3-70b` via its
+OpenAI-compatible endpoint), **Groq** (`openai/gpt-oss-20b`), and **OpenRouter** (free
+`:free` models) — and can switch between them on rate-limit / tokens-per-minute /
+tokens-per-day / quota errors.
 
-The provider order is controlled by `LLM_PRIMARY_PROVIDER` in `.env`:
+Cerebras is the primary provider because its free tier offers a **higher daily token
+quota**, which suits the multi-step investigation loop. It falls back to Groq, then
+OpenRouter as the last resort.
 
-- `LLM_PRIMARY_PROVIDER=openrouter` (default) — tries OpenRouter first, falls back to Groq.
-- `LLM_PRIMARY_PROVIDER=groq` — the faster option; tries Groq first, falls back to OpenRouter.
+The provider order is controlled by `LLM_PROVIDER_ORDER` in `.env` (comma-separated,
+default `cerebras,groq,openrouter`):
 
-It is currently recommended to leave it as `openrouter` while Groq's free tier is under
-heavy testing load, but it can be flipped back to `groq` anytime without code changes.
+```env
+LLM_PROVIDER_ORDER=cerebras,groq,openrouter
+```
 
-- Add `OPENROUTER_API_KEY` to `.env` to enable OpenRouter (required when it is the primary
-  provider; optional but recommended otherwise).
-- OpenRouter's free, no-cost `:free` models are used. The default model is
+- Every entry must be one of `cerebras`, `groq`, or `openrouter`; an invalid value
+  raises a clear error.
+- The legacy `LLM_PRIMARY_PROVIDER` config still works for backward compatibility
+  (e.g. `LLM_PRIMARY_PROVIDER=groq` expands to `groq,cerebras,openrouter`), but
+  `LLM_PROVIDER_ORDER` takes precedence when both are set.
+
+- Add `CEREBRAS_API_KEY` to `.env` to enable Cerebras (required since it is primary;
+  https://cloud.cerebras.ai).
+- Add `OPENROUTER_API_KEY` to `.env` to enable OpenRouter (optional but recommended;
+  https://openrouter.ai/keys).
+- OpenRouter uses free, no-cost `:free` models. The default model is
   `google/gemma-4-31b-it:free` (the previous `meta-llama/llama-3.3-70b-instruct:free` is no
   longer listed on OpenRouter); it is configurable via `OPENROUTER_MODEL` in `graph.py`.
-- Each LLM step logs which provider served it (e.g. `[llm:groq]` or `[llm:openrouter]`).
+- Each LLM step logs which provider served it (e.g. `[llm:cerebras]`, `[llm:groq]`, or
+  `[llm:openrouter]`) and logs a message when a provider is skipped due to rate-limiting.
 - All model calls still go through the same read-only SQL pipeline; only the LLM provider differs.
 
 ## Usage

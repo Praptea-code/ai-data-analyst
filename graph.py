@@ -24,9 +24,18 @@ GROQ_MODEL = "openai/gpt-oss-20b"
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 OPENROUTER_MODEL = "google/gemma-4-31b-it:free"
 
-# Which provider to try first. Accepted values: "groq" or "openrouter".
-# Defaults to OpenRouter while Groq's free tier is under heavy testing load;
-# flip back to "groq" (faster) anytime by setting LLM_PRIMARY_PROVIDER=groq.
+# Cerebras: OpenAI-compatible endpoint with higher free-tier daily token quota.
+# NOTE: "llama-3.3-70b" is the requested model ID; Cerebras's current public
+# free-tier catalog lists only "gpt-oss-120b" and "gemma-4-31b".  If Cerebras
+# does not serve this model, the call will fail at runtime and the fallback
+# chain will move to the next provider.
+CEREBRAS_BASE_URL = "https://api.cerebras.ai/v1"
+CEREBRAS_MODEL = "llama-3.3-70b"
+
+# Default provider order (Cerebras -> Groq -> OpenRouter).
+DEFAULT_PROVIDER_ORDER = "cerebras,groq,openrouter"
+
+# Legacy env var name kept for backward compatibility.
 LLM_PRIMARY_PROVIDER_DEFAULT = "openrouter"
 
 
@@ -68,30 +77,70 @@ def get_openrouter_llm():
     )
 
 
+def get_cerebras_llm():
+    """Build a Cerebras chat client (OpenAI-compatible), or None if no key."""
+    load_dotenv()
+    api_key = os.getenv("CEREBRAS_API_KEY")
+    if not api_key:
+        return None
+    return ChatOpenAI(
+        model=CEREBRAS_MODEL,
+        api_key=api_key,
+        base_url=CEREBRAS_BASE_URL,
+        temperature=0,
+    )
+
+
 def get_provider_llm(name: str):
-    """Return the chat client for a provider name ("groq" | "openrouter")."""
+    """Return the chat client for a provider name ("cerebras" | "groq" | "openrouter")."""
+    if name == "cerebras":
+        return get_cerebras_llm()
     if name == "groq":
         return get_groq_llm()
     if name == "openrouter":
         return get_openrouter_llm()
-    raise ValueError(f"Unknown LLM provider: {name!r}. Expected 'groq' or 'openrouter'.")
+    raise ValueError(
+        f"Unknown LLM provider: {name!r}. Expected 'cerebras', 'groq', or 'openrouter'."
+    )
 
 
 def get_provider_order() -> list[str]:
     """Provider names in the order they should be tried.
 
-    Reads LLM_PRIMARY_PROVIDER (default "openrouter") and returns the ordered
-    list, primary first.
+    Priority:
+    1. LLM_PROVIDER_ORDER env var (comma-separated, e.g. "cerebras,groq,openrouter").
+    2. Legacy LLM_PRIMARY_PROVIDER env var — expands to a full ordered list with
+       the other two providers appended as fallbacks.
+    3. DEFAULT_PROVIDER_ORDER ("cerebras,groq,openrouter").
+
+    Every entry must be one of "cerebras", "groq", or "openrouter".  A clear
+    error is raised listing any invalid entries.
     """
+    VALID_PROVIDERS = {"cerebras", "groq", "openrouter"}
+
     load_dotenv()
-    primary = os.getenv("LLM_PRIMARY_PROVIDER", LLM_PRIMARY_PROVIDER_DEFAULT).strip().lower()
-    if primary not in ("groq", "openrouter"):
+
+    raw_order = os.getenv("LLM_PROVIDER_ORDER", "").strip()
+
+    if not raw_order:
+        # Fall back to legacy LLM_PRIMARY_PROVIDER for backward compatibility.
+        primary = os.getenv("LLM_PRIMARY_PROVIDER", "").strip().lower()
+        if primary:
+            rest = [p for p in ("cerebras", "groq", "openrouter") if p != primary]
+            raw_order = f"{primary},{','.join(rest)}"
+        else:
+            raw_order = DEFAULT_PROVIDER_ORDER
+
+    order = [p.strip().lower() for p in raw_order.split(",") if p.strip()]
+
+    invalid = [p for p in order if p not in VALID_PROVIDERS]
+    if invalid:
         raise ValueError(
-            f"Invalid LLM_PRIMARY_PROVIDER: {primary!r}. Accepted values: 'groq' or 'openrouter'."
+            f"Invalid provider(s) in LLM_PROVIDER_ORDER: {invalid!r}. "
+            f"Accepted values: {sorted(VALID_PROVIDERS)}."
         )
-    if primary == "groq":
-        return ["groq", "openrouter"]
-    return ["openrouter", "groq"]
+
+    return order
 
 
 def is_rate_limit_error(err) -> bool:
@@ -139,20 +188,22 @@ def _invoke_llm(llm, prompt: str, max_retries: int = 3) -> str:
 def invoke_with_fallback(prompt: str) -> str:
     """Run an LLM call trying providers in configurable order.
 
-    Order is controlled by LLM_PRIMARY_PROVIDER (default "openrouter"). On a
-    rate-limit/quota error the call moves to the other provider. Real
+    Order is controlled by LLM_PROVIDER_ORDER (default "cerebras,groq,openrouter").
+    Falls back to legacy LLM_PRIMARY_PROVIDER if LLM_PROVIDER_ORDER is unset.
+    On a rate-limit/quota error the call moves to the next provider. Real
     (non-rate-limit) failures are propagated normally.
 
     The provider that served each call is printed so it is visible per step.
     """
     order = get_provider_order()
 
-    # If the primary provider is openrouter but no key is configured, fail fast
-    # with a clear message instead of silently using Groq.
-    if order[0] == "openrouter" and get_openrouter_llm() is None:
+    # If the primary provider has no key configured, fail fast with a clear
+    # message instead of silently skipping it.
+    first_llm = get_provider_llm(order[0])
+    if first_llm is None:
         raise RuntimeError(
-            "LLM_PRIMARY_PROVIDER is 'openrouter' but OPENROUTER_API_KEY is not set. "
-            "Set OPENROUTER_API_KEY in .env or set LLM_PRIMARY_PROVIDER=groq."
+            f"Primary provider '{order[0]}' has no API key configured. "
+            f"Set the corresponding key in .env or adjust LLM_PROVIDER_ORDER."
         )
 
     errors = []
@@ -165,8 +216,9 @@ def invoke_with_fallback(prompt: str) -> str:
 
         try:
             result = _invoke_llm(llm, prompt)
+            model = {"groq": GROQ_MODEL, "openrouter": OPENROUTER_MODEL, "cerebras": CEREBRAS_MODEL}
             print(f"[llm:{name}] step served by {name} "
-                  f"({GROQ_MODEL if name == 'groq' else OPENROUTER_MODEL}).", flush=True)
+                  f"({model.get(name, name)}).", flush=True)
             return result
         except Exception as e:  # noqa: BLE001
             if is_rate_limit_error(e):
