@@ -428,12 +428,14 @@ def should_continue(state: InvestigationState) -> str:
 # ---------------------------------------------------------------------------
 def generate_charts(state: InvestigationState) -> dict:
     charts = []
-    for f in state.get("findings", []):
+    for i, f in enumerate(state.get("findings", [])):
         if f.get("result", "").startswith("Error") or not f.get("rows"):
             continue
         spec = build_chart_from_finding(f)
         if spec:
             charts.append(spec)
+        else:
+            print(f"Skipping chart for finding {i}: no suitable label column found", flush=True)
     return {"charts": charts}
 
 
@@ -468,6 +470,12 @@ def build_chart_from_finding(finding: dict) -> dict | None:
             break
     if label_col is None and non_numeric:
         label_col = non_numeric[0]
+
+    # A chart needs a label/x-axis column. If the finding has no non-numeric
+    # column at all (e.g. a single numeric aggregate with no label dimension),
+    # there is nothing to plot labels on, so skip generating a chart for it.
+    if label_col is None:
+        return None
 
     y_col = numeric_cols[0]
 
