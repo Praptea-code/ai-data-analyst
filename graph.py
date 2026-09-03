@@ -25,12 +25,9 @@ OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 OPENROUTER_MODEL = "google/gemma-4-31b-it:free"
 
 # Cerebras: OpenAI-compatible endpoint with higher free-tier daily token quota.
-# NOTE: "llama-3.3-70b" is the requested model ID; Cerebras's current public
-# free-tier catalog lists only "gpt-oss-120b" and "gemma-4-31b".  If Cerebras
-# does not serve this model, the call will fail at runtime and the fallback
-# chain will move to the next provider.
+# Uses gpt-oss-120b, a current model on Cerebras's free-tier catalog.
 CEREBRAS_BASE_URL = "https://api.cerebras.ai/v1"
-CEREBRAS_MODEL = "llama-3.3-70b"
+CEREBRAS_MODEL = "gpt-oss-120b"
 
 # Default provider order (Cerebras -> Groq -> OpenRouter).
 DEFAULT_PROVIDER_ORDER = "cerebras,groq,openrouter"
