@@ -83,6 +83,7 @@ def get_provider_order() -> list[str]:
     Reads LLM_PRIMARY_PROVIDER (default "openrouter") and returns the ordered
     list, primary first.
     """
+    load_dotenv()
     primary = os.getenv("LLM_PRIMARY_PROVIDER", LLM_PRIMARY_PROVIDER_DEFAULT).strip().lower()
     if primary not in ("groq", "openrouter"):
         raise ValueError(
@@ -170,6 +171,7 @@ def invoke_with_fallback(prompt: str) -> str:
         except Exception as e:  # noqa: BLE001
             if is_rate_limit_error(e):
                 errors.append(f"{name}: {e}")
+                print(f"[llm:{name}] rate-limited/unavailable, trying next provider: {e}", flush=True)
                 continue
             raise
 
