@@ -13,6 +13,7 @@ from PIL import Image
 
 from tools import get_database_schema
 from tools_forecasting import forecast_revenue
+from tools_anomaly import detect_anomalies
 
 sys.stdout.reconfigure(encoding="utf-8")
 
@@ -53,6 +54,8 @@ class InvestigationState(TypedDict, total=False):
     final_answer: dict
     needs_forecast: bool
     forecast_done: bool
+    needs_anomaly_check: bool
+    anomaly_done: bool
 
 
 def get_groq_llm():
@@ -285,6 +288,8 @@ Do not include any text outside the JSON array."""
         "charts": [],
         "needs_forecast": False,
         "forecast_done": False,
+        "needs_anomaly_check": False,
+        "anomaly_done": False,
     }
 
 
@@ -295,11 +300,13 @@ def generate_sql(state: InvestigationState) -> dict:
     step = state["plan"][state["plan_index"]]
     previous = state.get("findings", [])
 
-    # If a forecast was requested, generate a historical monthly-revenue query
-    # instead of the next investigation step, so forecast_revenue() can run.
-    if state.get("needs_forecast") and not state.get("forecast_done"):
+    # If a forecast or anomaly check was requested, generate a historical
+    # monthly-revenue query instead of the next investigation step, so the
+    # forecasting/anomaly tool can run on it.
+    if (state.get("needs_forecast") and not state.get("forecast_done")) or \
+       (state.get("needs_anomaly_check") and not state.get("anomaly_done")):
         prompt = f"""You are writing a single READ-ONLY SQL query against a SQLite sales database
-to gather historical revenue data for time-series forecasting.
+to gather historical revenue data for time-series analysis.
 
 SCHEMA:
 {state['schema']}
@@ -412,6 +419,32 @@ def execute_sql_node(state: InvestigationState) -> dict:
             }]
             updates["forecast_done"] = True
 
+    # If an anomaly check was requested and the query returned historical
+    # revenue data, run detect_anomalies() and append the result to findings.
+    if state.get("needs_anomaly_check") and not state.get("anomaly_done") and df is not None:
+        try:
+            hist = df.to_dict(orient="records")
+            ad = detect_anomalies.invoke({"historical_data": json.dumps(hist, default=str),
+                                          "sensitivity": 2.0})
+            updates["findings"] = updates["findings"] + [{
+                "step": "revenue anomaly check",
+                "query": query,
+                "result": json.dumps(ad, default=str)[:2000],
+                "rows": [],
+                "columns": [],
+                "anomalies": ad,
+            }]
+            updates["anomaly_done"] = True
+        except Exception as e:  # noqa: BLE001
+            updates["findings"] = updates["findings"] + [{
+                "step": "revenue anomaly check",
+                "query": query,
+                "result": f"Error detecting anomalies: {e}",
+                "rows": [],
+                "columns": [],
+            }]
+            updates["anomaly_done"] = True
+
     return updates
 
 
@@ -449,6 +482,11 @@ about future revenue or trends, simply state in your observation that a revenue 
 needed, e.g. "A forecast of future monthly revenue would help answer this." The system will
 detect this and run the forecast automatically.
 
+Similarly, if the user's question involves detecting anomalies, spikes, drops, or unusual
+patterns in revenue, you can request anomaly detection by noting in your observation that
+anomalies should be checked, e.g. "An anomaly check of the revenue data would help answer
+this." The system will detect this and run the anomaly detection automatically.
+
 Return ONLY the observation text."""
 
     resp = invoke_with_fallback(prompt)
@@ -470,11 +508,19 @@ Return ONLY the observation text."""
                      or "future revenue" in lower_q or "future trend" in lower_q)
     needs_forecast = forecast_hint
 
+    # Detect whether an anomaly check is requested (in the observation or the
+    # user's question) so the loop can run a historical-revenue query and
+    # call detect_anomalies().
+    anomaly_keywords = ("anomaly", "anomalies", "unusual", "spike", "drop",
+                        "outlier", "pattern")
+    needs_anomaly_check = any(k in lower_obs or k in lower_q for k in anomaly_keywords)
+
     return {
         "observations": observations,
         "plan_index": plan_index,
         "steps": steps,
         "needs_forecast": needs_forecast,
+        "needs_anomaly_check": needs_anomaly_check,
     }
 
 
@@ -482,9 +528,10 @@ Return ONLY the observation text."""
 # Router: keep investigating while steps remain and budget is not exhausted
 # ---------------------------------------------------------------------------
 def should_continue(state: InvestigationState) -> str:
-    # If a forecast was requested but not yet computed, run one more
-    # generate_sql/execute round to gather historical data and forecast it.
-    if state.get("needs_forecast") and not state.get("forecast_done"):
+    # If a forecast or anomaly check was requested but not yet computed, run
+    # one more generate_sql/execute round to gather historical data and run it.
+    if (state.get("needs_forecast") and not state.get("forecast_done")) or \
+       (state.get("needs_anomaly_check") and not state.get("anomaly_done")):
         return "investigate"
     if state["steps"] >= MAX_STEPS:
         return "finalize"
