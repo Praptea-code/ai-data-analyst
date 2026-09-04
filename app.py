@@ -53,8 +53,9 @@ if submitted and question.strip():
         for i, spec in enumerate(charts):
             try:
                 fig = spec_to_figure(spec)
+                title = (spec.get("title") or f"chart_{i}").replace(" ", "_").lower()
                 with cols[i % 2]:
-                    st.plotly_chart(fig, use_container_width=True)
+                    st.plotly_chart(fig, use_container_width=True, key=f"chart_{i}_{title}")
                     st.caption(spec.get("subtitle", ""))
             except Exception as e:  # noqa: BLE001
                 st.caption(f"Could not render chart: {e}")
