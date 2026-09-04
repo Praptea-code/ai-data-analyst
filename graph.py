@@ -12,6 +12,7 @@ from langgraph.graph import END, StateGraph
 from PIL import Image
 
 from tools import get_database_schema
+from tools_forecasting import forecast_revenue
 
 sys.stdout.reconfigure(encoding="utf-8")
 
@@ -50,6 +51,8 @@ class InvestigationState(TypedDict, total=False):
     current_query: str
     current_result: str
     final_answer: dict
+    needs_forecast: bool
+    forecast_done: bool
 
 
 def get_groq_llm():
@@ -280,6 +283,8 @@ Do not include any text outside the JSON array."""
         "findings": [],
         "observations": [],
         "charts": [],
+        "needs_forecast": False,
+        "forecast_done": False,
     }
 
 
@@ -290,7 +295,24 @@ def generate_sql(state: InvestigationState) -> dict:
     step = state["plan"][state["plan_index"]]
     previous = state.get("findings", [])
 
-    prompt = f"""You are writing a single READ-ONLY SQL query against a SQLite sales database.
+    # If a forecast was requested, generate a historical monthly-revenue query
+    # instead of the next investigation step, so forecast_revenue() can run.
+    if state.get("needs_forecast") and not state.get("forecast_done"):
+        prompt = f"""You are writing a single READ-ONLY SQL query against a SQLite sales database
+to gather historical revenue data for time-series forecasting.
+
+SCHEMA:
+{state['schema']}
+
+Write ONE SQL SELECT statement that returns monthly total revenue over time.
+Use strftime('%Y-%m', sales.date) AS date and SUM(sales.quantity * sales.unit_price *
+(1 - sales.discount)) AS revenue, grouped by month and ordered by date ascending.
+Sales table has columns: date, customer_id, product_id, quantity, unit_price, discount,
+region, sales_rep. Revenue per row = quantity * unit_price * (1 - discount).
+
+Return ONLY the SQL statement. No markdown, no explanation."""
+    else:
+        prompt = f"""You are writing a single READ-ONLY SQL query against a SQLite sales database.
 
 SCHEMA:
 {state['schema']}
@@ -363,6 +385,33 @@ def execute_sql_node(state: InvestigationState) -> dict:
 
     updates["current_result"] = result
     updates["findings"] = state.get("findings", []) + [record]
+
+    # If a forecast was requested and the query returned historical revenue
+    # data, run forecast_revenue() and append the forecast to the findings.
+    if state.get("needs_forecast") and not state.get("forecast_done") and df is not None:
+        try:
+            hist = df.to_dict(orient="records")
+            fc = forecast_revenue.invoke({"historical_data": json.dumps(hist, default=str),
+                                          "periods": 12})
+            updates["findings"] = updates["findings"] + [{
+                "step": "revenue forecast",
+                "query": query,
+                "result": json.dumps(fc, default=str)[:2000],
+                "rows": [],
+                "columns": [],
+                "forecast": fc,
+            }]
+            updates["forecast_done"] = True
+        except Exception as e:  # noqa: BLE001
+            updates["findings"] = updates["findings"] + [{
+                "step": "revenue forecast",
+                "query": query,
+                "result": f"Error generating forecast: {e}",
+                "rows": [],
+                "columns": [],
+            }]
+            updates["forecast_done"] = True
+
     return updates
 
 
@@ -395,6 +444,10 @@ Write a concise observation (2-4 sentences) explaining what this result shows an
 points toward an explanation for the user's question. Mention specific numbers from the result.
 If the step errors, note the error and what a reasonable next step is.
 
+If the user's question is about future revenue or trends, you can request a forecast by
+calling forecast_revenue(historical_data=..., periods=12) where historical_data is a JSON
+list of past revenue points. Return the forecast in your observation.
+
 Return ONLY the observation text."""
 
     resp = invoke_with_fallback(prompt)
@@ -406,10 +459,16 @@ Return ONLY the observation text."""
     plan_index = state["plan_index"] + 1
     steps = state["steps"] + 1
 
+    # Detect whether the observation requests a revenue forecast so the loop
+    # can run a historical-revenue query and call forecast_revenue().
+    lower_obs = observation.lower()
+    needs_forecast = ("forecast" in lower_obs or "predict future" in lower_obs)
+
     return {
         "observations": observations,
         "plan_index": plan_index,
         "steps": steps,
+        "needs_forecast": needs_forecast,
     }
 
 
@@ -417,6 +476,10 @@ Return ONLY the observation text."""
 # Router: keep investigating while steps remain and budget is not exhausted
 # ---------------------------------------------------------------------------
 def should_continue(state: InvestigationState) -> str:
+    # If a forecast was requested but not yet computed, run one more
+    # generate_sql/execute round to gather historical data and forecast it.
+    if state.get("needs_forecast") and not state.get("forecast_done"):
+        return "investigate"
     if state["steps"] >= MAX_STEPS:
         return "finalize"
     if state["plan_index"] >= len(state["plan"]):
