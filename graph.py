@@ -9,6 +9,7 @@ from dotenv import load_dotenv
 from langchain_groq import ChatGroq
 from langchain_openai import ChatOpenAI
 from langgraph.graph import END, StateGraph
+from PIL import Image
 
 from tools import get_database_schema
 
@@ -588,6 +589,24 @@ def build_graph():
     return g.compile()
 
 
+def visualize_graph():
+    """Generate and save a diagram of the graph structure."""
+    try:
+        graph = build_graph()
+        # Get the graph structure as Mermaid diagram
+        graph_diagram = graph.get_graph().draw_mermaid_png()
+
+        # Save it to disk
+        with open("graph_diagram.png", "wb") as f:
+            f.write(graph_diagram)
+
+        print("✓ Graph diagram saved to graph_diagram.png")
+        return graph_diagram
+    except Exception as e:
+        print(f"Could not generate graph diagram: {e}")
+        return None
+
+
 def run_investigation(question: str) -> InvestigationState:
     graph = build_graph()
     result = graph.invoke(
@@ -595,3 +614,8 @@ def run_investigation(question: str) -> InvestigationState:
         config={"recursion_limit": 40},
     )
     return result
+
+
+if __name__ != "__main__":
+    # Auto-generate diagram when imported
+    visualize_graph()
