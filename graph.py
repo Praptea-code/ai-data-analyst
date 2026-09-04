@@ -389,8 +389,11 @@ def execute_sql_node(state: InvestigationState) -> dict:
     # If a forecast was requested and the query returned historical revenue
     # data, run forecast_revenue() and append the forecast to the findings.
     if state.get("needs_forecast") and not state.get("forecast_done") and df is not None:
+        print(f"DEBUG: needs_forecast={state['needs_forecast']}, forecast_done={state['forecast_done']}")
+        print(f"DEBUG: Query returned {len(df)} rows")
         try:
             hist = df.to_dict(orient="records")
+            print(f"DEBUG: About to call forecast_revenue() with {len(hist)} data points")
             fc = forecast_revenue.invoke({"historical_data": json.dumps(hist, default=str),
                                           "periods": 12})
             updates["findings"] = updates["findings"] + [{
@@ -444,9 +447,10 @@ Write a concise observation (2-4 sentences) explaining what this result shows an
 points toward an explanation for the user's question. Mention specific numbers from the result.
 If the step errors, note the error and what a reasonable next step is.
 
-If the user's question is about future revenue or trends, you can request a forecast by
-calling forecast_revenue(historical_data=..., periods=12) where historical_data is a JSON
-list of past revenue points. Return the forecast in your observation.
+IMPORTANT: Do NOT attempt to call any function or tool yourself. If the user's question is
+about future revenue or trends, simply state in your observation that a revenue forecast is
+needed, e.g. "A forecast of future monthly revenue would help answer this." The system will
+detect this and run the forecast automatically.
 
 Return ONLY the observation text."""
 
@@ -459,10 +463,15 @@ Return ONLY the observation text."""
     plan_index = state["plan_index"] + 1
     steps = state["steps"] + 1
 
-    # Detect whether the observation requests a revenue forecast so the loop
-    # can run a historical-revenue query and call forecast_revenue().
+    # Detect whether the observation (or the user's question) requests a
+    # revenue forecast so the loop can run a historical-revenue query and
+    # call forecast_revenue().
     lower_obs = observation.lower()
-    needs_forecast = ("forecast" in lower_obs or "predict future" in lower_obs)
+    lower_q = state.get("question", "").lower()
+    forecast_hint = ("forecast" in lower_obs or "predict future" in lower_obs
+                     or "forecast" in lower_q or "predict future" in lower_q
+                     or "future revenue" in lower_q or "future trend" in lower_q)
+    needs_forecast = forecast_hint
 
     return {
         "observations": observations,
