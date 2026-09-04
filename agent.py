@@ -11,12 +11,6 @@ load_dotenv()  # This explicitly loads .env into environment
 
 sys.stdout.reconfigure(encoding="utf-8")
 
-api_key = os.getenv('LANGSMITH_API_KEY')
-if api_key:
-    print(f"DEBUG: LangSmith API key loaded (first 20 chars): {api_key[:20]}...")
-else:
-    print("DEBUG: WARNING - LANGSMITH_API_KEY not found in environment")
-
 
 def pretty_answer(answer: dict) -> str:
     lines = []
