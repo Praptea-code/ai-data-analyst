@@ -389,11 +389,8 @@ def execute_sql_node(state: InvestigationState) -> dict:
     # If a forecast was requested and the query returned historical revenue
     # data, run forecast_revenue() and append the forecast to the findings.
     if state.get("needs_forecast") and not state.get("forecast_done") and df is not None:
-        print(f"DEBUG: needs_forecast={state['needs_forecast']}, forecast_done={state['forecast_done']}")
-        print(f"DEBUG: Query returned {len(df)} rows")
         try:
             hist = df.to_dict(orient="records")
-            print(f"DEBUG: About to call forecast_revenue() with {len(hist)} data points")
             fc = forecast_revenue.invoke({"historical_data": json.dumps(hist, default=str),
                                           "periods": 12})
             updates["findings"] = updates["findings"] + [{
