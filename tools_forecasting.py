@@ -48,8 +48,6 @@ def forecast_revenue(historical_data: str, periods: int = 12) -> dict:
 
         # Fallback: exponential smoothing
         else:
-            from scipy.signal import detrend
-
             values = df['revenue'].values
             trend = np.polyfit(np.arange(len(values)), values, 1)[0]
 
